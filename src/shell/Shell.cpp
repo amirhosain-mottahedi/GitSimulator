@@ -1,161 +1,148 @@
 
 #include "Shell.h"
-#include <sstream>
 
-// Constructor
-Shell::Shell(FileSystem& fileSystem) : fs(fileSystem) {
+#include <sstream>
+#include <stdexcept>
+
+Shell::Shell(
+    FileSystem& fileSystem,
+    Repository& repository
+)
+    : fs(fileSystem),
+      repo(repository),
+      gitHandler(fileSystem, repository) {
 }
 
-// Execute command
 bool Shell::executeLine(const string& line) {
     if (line.empty()) {
         return true;
     }
 
+    istringstream input(line);
+
     string command;
-    string arguments;
-
-    stringstream input(line);
-
     input >> command;
-    getline(input, arguments);
 
-    // Remove spaces from beginning of arguments
-    size_t start = arguments.find_first_not_of(" \t");
-
-    if (start == string::npos) {
-        arguments = "";
-    }
-    else {
-        arguments = arguments.substr(start);
-    }
-
-    // pwd
-    if (command == "pwd") {
-        fs.pwd();
-    }
-
-    // ls
-    else if (command == "ls") {
-        fs.ls();
-    }
-
-    // mkdir
-    else if (command == "mkdir") {
-        if (arguments.empty()) {
-            cout << "Usage: mkdir <name>" << endl;
-        }
-        else {
-            fs.mkdir(arguments);
-        }
-    }
-
-    // cd
-    else if (command == "cd") {
-        if (arguments.empty()) {
-            fs.cd("/");
-        }
-        else {
-            fs.cd(arguments);
-        }
-    }
-
-    // touch
-    else if (command == "touch") {
-        if (arguments.empty()) {
-            cout << "Usage: touch <filename>" << endl;
-        }
-        else {
-            fs.touch(arguments);
-        }
-    }
-
-    // cat
-    else if (command == "cat") {
-        if (arguments.empty()) {
-            cout << "Usage: cat <filename>" << endl;
-        }
-        else {
-            fs.cat(arguments);
-        }
-    }
-
-    // rm
-    else if (command == "rm") {
-        if (arguments.empty()) {
-            cout << "Usage: rm <name>" << endl;
-        }
-        else {
-            fs.rm(arguments);
-        }
-    }
-
-    // echo
-    else if (command == "echo") {
-        size_t overwritePosition = arguments.find(">");
-        size_t appendPosition = arguments.find(">>");
-
-        if (overwritePosition == string::npos) {
-            cout << arguments << endl;
-        }
-        else {
-            bool append = (appendPosition != string::npos);
-
-            size_t operatorPosition = append
-                ? appendPosition
-                : overwritePosition;
-
-            size_t operatorLength = append ? 2 : 1;
-
-            string text = arguments.substr(0, operatorPosition);
-            string filename = arguments.substr(
-                operatorPosition + operatorLength
-            );
-
-            // Trim spaces from filename
-            size_t filenameStart =
-                filename.find_first_not_of(" \t");
-
-            if (filenameStart == string::npos) {
-                cout << "Usage: echo text > filename" << endl;
-                return true;
-            }
-
-            filename = filename.substr(filenameStart);
-
-            size_t filenameEnd =
-                filename.find_last_not_of(" \t");
-
-            filename = filename.substr(0, filenameEnd + 1);
-
-            // Trim spaces from text
-            size_t textStart = text.find_first_not_of(" \t");
-
-            if (textStart == string::npos) {
-                text = "";
-            }
-            else {
-                text = text.substr(textStart);
-            }
-
-            size_t textEnd = text.find_last_not_of(" \t");
-
-            if (textEnd != string::npos) {
-                text = text.substr(0, textEnd + 1);
-            }
-
-            fs.writeFile(filename, text, append);
-        }
-    }
-
-    // exit
-    else if (command == "exit") {
+    if (command == "exit") {
         return false;
     }
 
-    // Unknown command
+    if (command == "pwd") {
+        string extra;
+
+        if (input >> extra) {
+            throw invalid_argument("Usage: pwd");
+        }
+
+        fs.pwd();
+    }
+    else if (command == "ls") {
+        string extra;
+
+        if (input >> extra) {
+            throw invalid_argument("Usage: ls");
+        }
+
+        fs.ls();
+    }
+    else if (command == "mkdir") {
+        string name;
+        string extra;
+
+        if (!(input >> name) || (input >> extra)) {
+            throw invalid_argument("Usage: mkdir <name>");
+        }
+
+        fs.mkdir(name);
+    }
+    else if (command == "cd") {
+        string path;
+        string extra;
+
+        if (!(input >> path) || (input >> extra)) {
+            throw invalid_argument("Usage: cd <path>");
+        }
+
+        fs.cd(path);
+    }
+    else if (command == "touch") {
+        string name;
+        string extra;
+
+        if (!(input >> name) || (input >> extra)) {
+            throw invalid_argument("Usage: touch <filename>");
+        }
+
+        fs.touch(name);
+    }
+    else if (command == "cat") {
+        string name;
+        string extra;
+
+        if (!(input >> name) || (input >> extra)) {
+            throw invalid_argument("Usage: cat <filename>");
+        }
+
+        fs.cat(name);
+    }
+    else if (command == "rm") {
+        string name;
+        string extra;
+
+        if (!(input >> name) || (input >> extra)) {
+            throw invalid_argument("Usage: rm <filename>");
+        }
+
+        fs.rm(name);
+    }
+    else if (command == "echo") {
+        size_t redirect = line.find(">>");
+        bool append = true;
+
+        if (redirect == string::npos) {
+            redirect = line.find('>');
+            append = false;
+        }
+
+        if (redirect == string::npos) {
+            throw invalid_argument(
+                "Usage: echo \"text\" > filename"
+            );
+        }
+
+        string text = line.substr(4, redirect - 4);
+        string fileName = line.substr(
+            redirect + (append ? 2 : 1)
+        );
+
+        size_t first = text.find('"');
+        size_t last = text.find_last_of('"');
+
+        if (first != string::npos && last > first) {
+            text = text.substr(first + 1, last - first - 1);
+        }
+
+        size_t start = fileName.find_first_not_of(" \t");
+        size_t end = fileName.find_last_not_of(" \t");
+
+        if (start == string::npos) {
+            throw invalid_argument("Filename is missing!");
+        }
+
+        fileName = fileName.substr(start, end - start + 1);
+
+        if (fileName.find('/') != string::npos ||
+            fileName.find(' ') != string::npos) {
+            throw invalid_argument("Invalid filename!");
+        }
+
+        fs.writeFile(fileName, text, append);
+    }
+    else if (command == "git") {
+        gitHandler.execute(line);
+    }
     else {
-        cout << "Command not found: " << command << endl;
+        throw invalid_argument("Unknown command: " + command);
     }
 
     return true;

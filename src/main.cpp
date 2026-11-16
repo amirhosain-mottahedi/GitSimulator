@@ -1,15 +1,19 @@
 
 #include <iostream>
 #include <string>
+#include <exception>
 
 #include "filesystem/FileSystem.h"
 #include "shell/Shell.h"
+#include "repository/Repository.h"
 
 using namespace std;
 
 int main() {
     FileSystem fs;
-    Shell shell(fs);
+    Repository repository;
+
+    Shell shell(fs, repository);
 
     string command;
 
@@ -21,29 +25,31 @@ int main() {
     cout << "Type 'exit' to close the program." << endl;
 
     while (true) {
-        cout << "\nGitSimulator> ";
+        cout << "\n$ ";
 
         if (!getline(cin, command)) {
             break;
         }
 
-        if (command == "help") {
-            cout << "\nAvailable commands:" << endl;
-            cout << "pwd       - Show current directory" << endl;
-            cout << "ls        - List directory contents" << endl;
-            cout << "mkdir     - Create a directory" << endl;
-            cout << "cd        - Change directory" << endl;
-            cout << "touch     - Create a file" << endl;
-            cout << "echo      - Write text into a file" << endl;
-            cout << "cat       - Display file contents" << endl;
-            cout << "rm        - Remove a file or directory" << endl;
-            cout << "exit      - Close the program" << endl;
+        try {
+            if (command == "help") {
+                cout << "\nAvailable commands:" << endl;
+                cout << "pwd, ls, mkdir, cd" << endl;
+                cout << "touch, echo, cat, rm" << endl;
+                cout << "git config, git init" << endl;
+                cout << "git add, git reset" << endl;
+                cout << "git commit, git status, git log" << endl;
+                cout << "exit" << endl;
 
-            continue;
+                continue;
+            }
+
+            if (!shell.executeLine(command)) {
+                break;
+            }
         }
-
-        if (!shell.executeLine(command)) {
-            break;
+        catch (const exception& error) {
+            cout << "Error: " << error.what() << endl;
         }
     }
 

@@ -9,8 +9,13 @@
 using namespace std;
 
 class FileSystem {
-private:
+public:
+    struct FileData {
+        string path;
+        vector<string> content;
+    };
 
+private:
     struct Node {
         string name;
         bool isDirectory;
@@ -28,8 +33,15 @@ private:
 
     void destroyTree(Node* node);
 
-public:
+    void collectFiles(
+        Node* directory,
+        const string& relativePath,
+        vector<FileData>& result
+    ) const;
 
+    bool isValidName(const string& name) const;
+
+public:
     FileSystem();
     ~FileSystem();
 
@@ -40,10 +52,34 @@ public:
     void ls() const;
     void pwd() const;
 
-    void writeFile(const string& name, const string& text, bool append);
-    void cat(const string& name) const;
+    void writeFile(
+        const string& name,
+        const string& text,
+        bool append
+    );
 
+    void cat(const string& name) const;
     void rm(const string& name);
+
+    // Information for Git
+    string getCurrentPath() const;
+
+    vector<FileData> getAllFiles(
+        const string& directoryPath
+    ) const;
+
+    bool readFile(
+        const string& path,
+        vector<string>& content
+    ) const;
+
+    bool createFile(
+        const string& path,
+        const vector<string>& content
+    );
+
+    bool deleteFile(const string& path);
+
 };
 
 #endif
