@@ -1,33 +1,53 @@
 
 #include <iostream>
+#include <string>
+
 #include "filesystem/FileSystem.h"
+#include "shell/Shell.h"
 
 using namespace std;
 
 int main() {
     FileSystem fs;
+    Shell shell(fs);
 
-    cout << "=== Recursive Remove Test ===" << endl;
+    string command;
 
-    cout << "\n1. Creating Documents:" << endl;
-    fs.mkdir("Documents");
+    cout << "================================" << endl;
+    cout << "       GitSimulator v1.0" << endl;
+    cout << "================================" << endl;
 
-    cout << "\n2. Entering Documents:" << endl;
-    fs.cd("Documents");
-    fs.pwd();
+    cout << "Type 'help' for available commands." << endl;
+    cout << "Type 'exit' to close the program." << endl;
 
-    cout << "\n3. Creating a file inside Documents:" << endl;
-    fs.touch("notes.txt");
+    while (true) {
+        cout << "\nGitSimulator> ";
 
-    cout << "\n4. Returning to root:" << endl;
-    fs.cd("/");
-    fs.pwd();
+        if (!getline(cin, command)) {
+            break;
+        }
 
-    cout << "\n5. Removing Documents and its contents:" << endl;
-    fs.rm("Documents");
+        if (command == "help") {
+            cout << "\nAvailable commands:" << endl;
+            cout << "pwd       - Show current directory" << endl;
+            cout << "ls        - List directory contents" << endl;
+            cout << "mkdir     - Create a directory" << endl;
+            cout << "cd        - Change directory" << endl;
+            cout << "touch     - Create a file" << endl;
+            cout << "echo      - Write text into a file" << endl;
+            cout << "cat       - Display file contents" << endl;
+            cout << "rm        - Remove a file or directory" << endl;
+            cout << "exit      - Close the program" << endl;
 
-    cout << "\n6. Final directory listing:" << endl;
-    fs.ls();
+            continue;
+        }
+
+        if (!shell.executeLine(command)) {
+            break;
+        }
+    }
+
+    cout << "\nGitSimulator closed." << endl;
 
     return 0;
 }
