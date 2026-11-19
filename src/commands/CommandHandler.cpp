@@ -500,6 +500,21 @@ void CommandHandler::showStatus() {
     }
 }
 
+void CommandHandler::showBranches() const {
+    vector<string> branches = repo.getBranchNames();
+
+    for (int i = 0; i < static_cast<int>(branches.size()); i++) {
+        if (branches[i] == repo.getCurrentBranch()) {
+            cout << "* ";
+        }
+        else {
+            cout << "  ";
+        }
+
+        cout << branches[i] << endl;
+    }
+}
+
 void CommandHandler::showLog() {
     if (repo.getHeadCommitId() == 0) {
         throw runtime_error("No commits yet.");
@@ -616,7 +631,57 @@ void CommandHandler::execute(const string& command) {
         throw runtime_error("Not a Git repository!");
     }
 
-    if (operation == "add") {
+    if (operation == "branch") {
+        string argument;
+
+        if (!(input >> argument)) {
+            showBranches();
+            return;
+        }
+
+        if (argument == "-d") {
+            string branchName;
+            string extra;
+
+            if (!(input >> branchName) || (input >> extra)) {
+                throw invalid_argument("Usage: git branch -d <name>");
+            }
+
+            if (!repo.branchExists(branchName)) {
+                throw runtime_error("Branch not found.");
+            }
+
+            if (!repo.deleteBranch(branchName)) {
+                throw runtime_error("Cannot delete the current branch.");
+            }
+
+            cout << "Deleted branch " << branchName << "." << endl;
+            return;
+        }
+
+        string extra;
+
+        if (input >> extra) {
+            throw invalid_argument("Usage: git branch [<name>|-d <name>]");
+        }
+
+        if (argument[0] == '-') {
+            throw invalid_argument("Usage: git branch [<name>|-d <name>]");
+        }
+
+        if (argument.find_first_not_of(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+            ) != string::npos) {
+            throw invalid_argument("Invalid branch name.");
+        }
+
+        if (!repo.createBranch(argument)) {
+            throw runtime_error("Branch already exists.");
+        }
+
+        cout << "Branch " << argument << " created." << endl;
+    }
+    else if (operation == "add") {
         string name;
         string extra;
 

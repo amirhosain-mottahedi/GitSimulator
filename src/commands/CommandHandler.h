@@ -31,6 +31,7 @@ private:
 
     void showStatus();
     void showLog();
+    void showBranches() const;
 
 public:
     CommandHandler(
