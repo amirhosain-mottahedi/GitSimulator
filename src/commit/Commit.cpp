@@ -8,10 +8,12 @@ Commit::Commit(
     const string& name,
     const string& email,
     const string& commitDate,
-    const vector<FileSnapshot>& files
+    const vector<FileSnapshot>& files,
+    int secondParentCommitId
 ) {
     id = commitId;
     parentId = parentCommitId;
+    secondParentId = secondParentCommitId;
 
     message = commitMessage;
     authorName = name;
@@ -27,6 +29,10 @@ int Commit::getId() const {
 
 int Commit::getParentId() const {
     return parentId;
+}
+
+int Commit::getSecondParentId() const {
+    return secondParentId;
 }
 
 string Commit::getMessage() const {

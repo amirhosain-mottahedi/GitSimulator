@@ -13,7 +13,149 @@ using namespace std;
 CommandHandler::CommandHandler(
     FileSystem& fileSystem,
     Repository& repository
-) : fs(fileSystem), repo(repository) {
+) : fs(fileSystem),
+    repo(repository),
+    mergeInProgress(false),
+    mergeParentId(-1),
+    mergeBranchName("") {
+}
+
+const Commit::FileSnapshot* CommandHandler::findFile(
+    const vector<Commit::FileSnapshot>& files,
+    const string& path
+) const {
+    for (const auto& file : files) {
+        if (file.path == path) {
+            return &file;
+        }
+    }
+
+    return nullptr;
+}
+
+void CommandHandler::removeResolvedConflict(const string& path) {
+    auto it = find(
+        unresolvedConflicts.begin(),
+        unresolvedConflicts.end(),
+        path
+    );
+
+    if (it != unresolvedConflicts.end()) {
+        unresolvedConflicts.erase(it);
+    }
+}
+
+int CommandHandler::findCommonAncestor(
+    int firstCommitId,
+    int secondCommitId
+) const {
+    vector<pair<int, int>> firstAncestors;
+    vector<pair<int, int>> secondAncestors;
+
+    vector<pair<int, int>> pending;
+    pending.push_back({firstCommitId, 0});
+
+    for (size_t i = 0; i < pending.size(); i++) {
+        int id = pending[i].first;
+        int distance = pending[i].second;
+
+        bool visited = false;
+
+        for (const auto& item : firstAncestors) {
+            if (item.first == id) {
+                visited = true;
+                break;
+            }
+        }
+
+        if (visited) {
+            continue;
+        }
+
+        firstAncestors.push_back({id, distance});
+
+        const Commit* commit = repo.findCommit(id);
+
+        if (commit == nullptr) {
+            continue;
+        }
+
+        if (commit->getParentId() != -1) {
+            pending.push_back({
+                commit->getParentId(),
+                distance + 1
+            });
+        }
+
+        if (commit->getSecondParentId() != -1) {
+            pending.push_back({
+                commit->getSecondParentId(),
+                distance + 1
+            });
+        }
+    }
+
+    pending.clear();
+    pending.push_back({secondCommitId, 0});
+
+    for (size_t i = 0; i < pending.size(); i++) {
+        int id = pending[i].first;
+        int distance = pending[i].second;
+
+        bool visited = false;
+
+        for (const auto& item : secondAncestors) {
+            if (item.first == id) {
+                visited = true;
+                break;
+            }
+        }
+
+        if (visited) {
+            continue;
+        }
+
+        secondAncestors.push_back({id, distance});
+
+        const Commit* commit = repo.findCommit(id);
+
+        if (commit == nullptr) {
+            continue;
+        }
+
+        if (commit->getParentId() != -1) {
+            pending.push_back({
+                commit->getParentId(),
+                distance + 1
+            });
+        }
+
+        if (commit->getSecondParentId() != -1) {
+            pending.push_back({
+                commit->getSecondParentId(),
+                distance + 1
+            });
+        }
+    }
+
+    int commonAncestor = -1;
+    int bestDistance = -1;
+
+    for (const auto& first : firstAncestors) {
+        for (const auto& second : secondAncestors) {
+            if (first.first == second.first) {
+                int totalDistance = first.second + second.second;
+
+                if (bestDistance == -1 ||
+                    totalDistance < bestDistance) {
+                    bestDistance = totalDistance;
+                    commonAncestor = first.first;
+                }
+            }
+        }
+    }
+
+    return commonAncestor;
 }
 
 string CommandHandler::getRelativePath(
@@ -144,6 +286,7 @@ void CommandHandler::addFile(const string& name) {
         }
 
         repo.removeFromStaging(relativePath);
+        removeResolvedConflict(relativePath);
 
         cout << "File deletion added to staging." << endl;
         return;
@@ -154,6 +297,21 @@ void CommandHandler::addFile(const string& name) {
     file.content = content;
 
     repo.addToStaging(file);
+
+    bool hasConflictMarkers = false;
+
+    for (const string& line : content) {
+        if (line.find("<<<<<<<") != string::npos ||
+            line.find("=======") != string::npos ||
+            line.find(">>>>>>>") != string::npos) {
+            hasConflictMarkers = true;
+            break;
+        }
+    }
+
+    if (!hasConflictMarkers) {
+        removeResolvedConflict(relativePath);
+    }
 
     cout << "File added to staging." << endl;
 }
@@ -253,6 +411,12 @@ void CommandHandler::createCommit(const string& message) {
         throw invalid_argument("Commit message cannot be empty.");
     }
 
+    if (mergeInProgress && !unresolvedConflicts.empty()) {
+        throw runtime_error(
+            "Cannot commit: unresolved merge conflicts remain."
+        );
+    }
+
     const vector<Commit::FileSnapshot>& staged =
         repo.getStaging();
 
@@ -291,7 +455,7 @@ void CommandHandler::createCommit(const string& message) {
         }
     }
 
-    if (sameAsPrevious) {
+    if (sameAsPrevious && !mergeInProgress) {
         vector<Commit::FileSnapshot> working =
             getWorkingFiles(repo.getRootPath());
 
@@ -342,6 +506,12 @@ void CommandHandler::createCommit(const string& message) {
     int id = repo.getNextCommitId();
     int parentId = repo.getHeadCommitId();
 
+    int secondParentId = -1;
+
+    if (mergeInProgress) {
+        secondParentId = mergeParentId;
+    }
+
     Commit commit(
         id,
         parentId,
@@ -349,7 +519,8 @@ void CommandHandler::createCommit(const string& message) {
         repo.getUserName(),
         repo.getUserEmail(),
         dateStream.str(),
-        staged
+        staged,
+        secondParentId
     );
 
     repo.addCommit(commit);
@@ -357,6 +528,57 @@ void CommandHandler::createCommit(const string& message) {
     cout << "[" << repo.getCurrentBranch()
          << " " << id << "] "
          << message << endl;
+
+    if (mergeInProgress) {
+        cout << "Merge commit created successfully." << endl;
+
+        mergeInProgress = false;
+        mergeParentId = -1;
+        mergeBranchName = "";
+        unresolvedConflicts.clear();
+    }
+}
+
+void CommandHandler::reset(const string& mode, int commitId) {
+    const Commit* targetCommit = repo.findCommit(commitId);
+
+    if (targetCommit == nullptr) {
+        throw runtime_error("Commit not found.");
+    }
+
+    if (mode != "--soft" &&
+        mode != "--mixed" &&
+        mode != "--hard") {
+        throw invalid_argument("Invalid reset mode.");
+    }
+
+    vector<Commit::FileSnapshot> targetSnapshot =
+        targetCommit->getSnapshot();
+
+    if (mode == "--hard") {
+        restoreWorkingTree(targetSnapshot);
+        repo.setStaging(targetSnapshot);
+    }
+    else if (mode == "--mixed") {
+        repo.setStaging(targetSnapshot);
+    }
+
+    repo.resetHead(commitId);
+
+    cout << "HEAD is now at "
+         << commitId << " ("
+         << targetCommit->getMessage() << ")"
+         << endl;
+
+    if (mode == "--soft") {
+        cout << "Soft reset completed." << endl;
+    }
+    else if (mode == "--mixed") {
+        cout << "Mixed reset completed." << endl;
+    }
+    else {
+        cout << "Hard reset completed." << endl;
+    }
 }
 
 void CommandHandler::showStatus() {
@@ -515,6 +737,259 @@ void CommandHandler::showBranches() const {
     }
 }
 
+bool CommandHandler::hasUncommittedChanges() {
+    vector<Commit::FileSnapshot> working =
+        getWorkingFiles(repo.getRootPath());
+
+    const Commit* head = repo.findCommit(repo.getHeadCommitId());
+    vector<Commit::FileSnapshot> committed;
+
+    if (head != nullptr) {
+        committed = head->getSnapshot();
+    }
+
+    const vector<Commit::FileSnapshot>& staged = repo.getStaging();
+
+    if (working.size() != committed.size() ||
+        staged.size() != committed.size()) {
+        return true;
+    }
+
+    for (int i = 0; i < static_cast<int>(committed.size()); i++) {
+        bool foundWorking = false;
+        bool foundStaged = false;
+
+        for (int j = 0; j < static_cast<int>(working.size()); j++) {
+            if (working[j].path == committed[i].path &&
+                working[j].content == committed[i].content) {
+                foundWorking = true;
+                break;
+            }
+        }
+
+        for (int j = 0; j < static_cast<int>(staged.size()); j++) {
+            if (staged[j].path == committed[i].path &&
+                staged[j].content == committed[i].content) {
+                foundStaged = true;
+                break;
+            }
+        }
+
+        if (!foundWorking || !foundStaged) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void CommandHandler::restoreWorkingTree(
+    const vector<Commit::FileSnapshot>& snapshot
+) {
+    vector<FileSystem::FileData> current =
+        fs.getAllFiles(repo.getRootPath());
+
+    for (int i = 0; i < static_cast<int>(current.size()); i++) {
+        string fullPath = repo.getRootPath();
+
+        if (fullPath == "/") {
+            fullPath += current[i].path;
+        }
+        else {
+            fullPath += "/" + current[i].path;
+        }
+
+        if (!fs.deleteFile(fullPath)) {
+            throw runtime_error("Could not remove a working file.");
+        }
+    }
+
+    for (int i = 0; i < static_cast<int>(snapshot.size()); i++) {
+        string fullPath = repo.getRootPath();
+
+        if (fullPath == "/") {
+            fullPath += snapshot[i].path;
+        }
+        else {
+            fullPath += "/" + snapshot[i].path;
+        }
+
+        if (!fs.createFile(fullPath, snapshot[i].content)) {
+            throw runtime_error(
+                "Could not restore file: " + snapshot[i].path
+            );
+        }
+    }
+}
+
+
+void CommandHandler::checkoutBranch(const string& name) {
+    bool isBranch = repo.branchExists(name);
+    int targetHeadId = -1;
+
+    if (isBranch) {
+        if (name == repo.getCurrentBranch()) {
+            cout << "Already on branch " << name << "." << endl;
+            return;
+        }
+
+        targetHeadId = repo.getBranchHeadCommitId(name);
+    }
+    else {
+        try {
+            size_t position;
+            targetHeadId = stoi(name, &position);
+
+            if (position != name.size() || targetHeadId <= 0) {
+                throw runtime_error("Invalid commit ID.");
+            }
+        }
+        catch (...) {
+            throw runtime_error("Branch or commit not found.");
+        }
+
+        if (repo.findCommit(targetHeadId) == nullptr) {
+            throw runtime_error("Commit not found.");
+        }
+    }
+
+    if (hasUncommittedChanges()) {
+        throw runtime_error(
+            "You have uncommitted changes. Commit or clean them before switching."
+        );
+    }
+
+    if (targetHeadId < 0) {
+        throw runtime_error("Could not find target information.");
+    }
+
+    vector<Commit::FileSnapshot> targetSnapshot;
+
+    if (targetHeadId != 0) {
+        const Commit* targetCommit = repo.findCommit(targetHeadId);
+
+        if (targetCommit == nullptr) {
+            throw runtime_error("Target commit not found.");
+        }
+
+        targetSnapshot = targetCommit->getSnapshot();
+    }
+
+    restoreWorkingTree(targetSnapshot);
+
+    if (!repo.checkoutBranch(name)) {
+        throw runtime_error("Could not switch to target.");
+    }
+
+    repo.setStaging(targetSnapshot);
+
+    if (isBranch) {
+        cout << "Switched to branch '" << name << "'." << endl;
+    }
+    else {
+        cout << "HEAD is now detached at commit " << name << "." << endl;
+    }
+}
+
+void CommandHandler::showDiff(const string& filename) {
+    if (filename.empty() ||
+        filename.find('/') != string::npos ||
+        filename.find(' ') != string::npos) {
+        throw invalid_argument("Invalid filename.");
+    }
+
+    string currentPath = fs.getCurrentPath();
+    string fullPath;
+
+    if (currentPath == "/") {
+        fullPath = "/" + filename;
+    }
+    else {
+        fullPath = currentPath + "/" + filename;
+    }
+
+    string relativePath = getRelativePath(fullPath);
+
+    const vector<Commit::FileSnapshot>& staged = repo.getStaging();
+    const Commit::FileSnapshot* stagedFile = nullptr;
+
+    for (int i = 0; i < static_cast<int>(staged.size()); i++) {
+        if (staged[i].path == relativePath) {
+            stagedFile = &staged[i];
+            break;
+        }
+    }
+
+    if (stagedFile == nullptr) {
+        throw runtime_error("File not found in staging.");
+    }
+
+    vector<string> workingContent;
+
+    if (!fs.readFile(fullPath, workingContent)) {
+        workingContent.clear();
+    }
+
+    const vector<string>& stagedContent = stagedFile->content;
+
+    int stagedSize = static_cast<int>(stagedContent.size());
+    int workingSize = static_cast<int>(workingContent.size());
+
+    vector<vector<int>> lcs(
+        stagedSize + 1,
+        vector<int>(workingSize + 1, 0)
+    );
+
+    for (int i = stagedSize - 1; i >= 0; i--) {
+        for (int j = workingSize - 1; j >= 0; j--) {
+            if (stagedContent[i] == workingContent[j]) {
+                lcs[i][j] = 1 + lcs[i + 1][j + 1];
+            }
+            else {
+                lcs[i][j] = max(
+                    lcs[i + 1][j],
+                    lcs[i][j + 1]
+                );
+            }
+        }
+    }
+
+    if (stagedContent == workingContent) {
+        cout << "No differences found." << endl;
+        return;
+    }
+
+    cout << "diff -- " << relativePath << endl;
+
+    int i = 0;
+    int j = 0;
+
+    while (i < stagedSize && j < workingSize) {
+        if (stagedContent[i] == workingContent[j]) {
+            i++;
+            j++;
+        }
+        else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+            cout << "- " << stagedContent[i] << endl;
+            i++;
+        }
+        else {
+            cout << "+ " << workingContent[j] << endl;
+            j++;
+        }
+    }
+
+    while (i < stagedSize) {
+        cout << "- " << stagedContent[i] << endl;
+        i++;
+    }
+
+    while (j < workingSize) {
+        cout << "+ " << workingContent[j] << endl;
+        j++;
+    }
+}
+
 void CommandHandler::showLog() {
     if (repo.getHeadCommitId() == 0) {
         throw runtime_error("No commits yet.");
@@ -529,7 +1004,13 @@ void CommandHandler::showLog() {
             break;
         }
 
-        cout << "commit " << commit->getId() << endl;
+        cout << "commit " << commit->getId();
+
+        if (commit->getSecondParentId() != -1) {
+            cout << " (Merge Commit)";
+        }
+
+        cout << endl;
 
         cout << "Author: "
              << commit->getAuthorName()
@@ -542,11 +1023,207 @@ void CommandHandler::showLog() {
              << commit->getDate()
              << endl;
 
+        if (commit->getSecondParentId() != -1) {
+            cout << "Merge:  "
+                 << commit->getParentId()
+                 << " "
+                 << commit->getSecondParentId()
+                 << endl;
+        }
+
         cout << endl;
         cout << "    " << commit->getMessage() << endl;
         cout << endl;
 
         currentId = commit->getParentId();
+    }
+}
+
+void CommandHandler::mergeBranch(const string& branchName) {
+    if (!repo.isInitialized()) {
+        throw runtime_error("Repository is not initialized.");
+    }
+
+    if (!repo.branchExists(branchName)) {
+        throw runtime_error("Branch not found.");
+    }
+
+    if (branchName == repo.getCurrentBranch()) {
+        throw runtime_error("Cannot merge a branch into itself.");
+    }
+
+    if (hasUncommittedChanges()) {
+        throw runtime_error(
+            "You have uncommitted changes. Commit or reset them first."
+        );
+    }
+
+    int currentHead = repo.getHeadCommitId();
+    int targetHead = repo.getBranchHeadCommitId(branchName);
+
+    if (currentHead == targetHead) {
+        cout << "Already up to date." << endl;
+        return;
+    }
+
+    const Commit* currentCommit = repo.findCommit(currentHead);
+    const Commit* targetCommit = repo.findCommit(targetHead);
+
+    vector<Commit::FileSnapshot> ours;
+    vector<Commit::FileSnapshot> theirs;
+    vector<Commit::FileSnapshot> base;
+
+    if (currentCommit != nullptr) {
+        ours = currentCommit->getSnapshot();
+    }
+
+    if (targetCommit != nullptr) {
+        theirs = targetCommit->getSnapshot();
+    }
+
+int commonAncestor = findCommonAncestor(
+    currentHead,
+    targetHead
+);
+
+if (commonAncestor == targetHead) {
+    mergeInProgress = false;
+    mergeParentId = -1;
+    mergeBranchName = "";
+    unresolvedConflicts.clear();
+
+    cout << "Already up to date." << endl;
+    return;
+}
+
+if (commonAncestor == currentHead &&
+    currentHead != targetHead) {
+
+    restoreWorkingTree(theirs);
+
+    repo.setStaging(theirs);
+
+    if (!repo.fastForwardCurrentBranch(targetHead)) {
+        throw runtime_error("Fast-forward failed.");
+    }
+
+    mergeInProgress = false;
+    mergeParentId = -1;
+    mergeBranchName = "";
+    unresolvedConflicts.clear();
+
+    cout << "Fast-forward completed successfully." << endl;
+    return;
+}
+
+const Commit* baseCommit = repo.findCommit(commonAncestor);
+
+    if (baseCommit != nullptr) {
+        base = baseCommit->getSnapshot();
+    }
+
+    vector<string> allPaths;
+
+    auto addPaths = [&](const vector<Commit::FileSnapshot>& files) {
+        for (const auto& file : files) {
+            if (find(allPaths.begin(), allPaths.end(), file.path)
+                == allPaths.end()) {
+                allPaths.push_back(file.path);
+            }
+        }
+    };
+
+    addPaths(base);
+    addPaths(ours);
+    addPaths(theirs);
+
+    vector<Commit::FileSnapshot> mergedFiles;
+    unresolvedConflicts.clear();
+
+    auto sameFile = [](
+        const Commit::FileSnapshot* first,
+        const Commit::FileSnapshot* second
+    ) {
+        if (first == nullptr && second == nullptr) {
+            return true;
+        }
+
+        if (first == nullptr || second == nullptr) {
+            return false;
+        }
+
+        return first->content == second->content;
+    };
+
+    for (const string& path : allPaths) {
+        const auto* baseFile = findFile(base, path);
+        const auto* ourFile = findFile(ours, path);
+        const auto* theirFile = findFile(theirs, path);
+
+        const Commit::FileSnapshot* selectedFile = nullptr;
+
+        if (sameFile(ourFile, theirFile)) {
+            selectedFile = ourFile;
+        }
+        else if (sameFile(ourFile, baseFile)) {
+            selectedFile = theirFile;
+        }
+        else if (sameFile(theirFile, baseFile)) {
+            selectedFile = ourFile;
+        }
+        else {
+            Commit::FileSnapshot conflictFile;
+            conflictFile.path = path;
+
+            conflictFile.content.push_back("<<<<<<< HEAD");
+
+            if (ourFile != nullptr) {
+                for (const string& line : ourFile->content) {
+                    conflictFile.content.push_back(line);
+                }
+            }
+
+            conflictFile.content.push_back("=======");
+
+            if (theirFile != nullptr) {
+                for (const string& line : theirFile->content) {
+                    conflictFile.content.push_back(line);
+                }
+            }
+
+            conflictFile.content.push_back(
+                ">>>>>>> " + branchName
+            );
+
+            mergedFiles.push_back(conflictFile);
+            unresolvedConflicts.push_back(path);
+            continue;
+        }
+
+        if (selectedFile != nullptr) {
+            mergedFiles.push_back(*selectedFile);
+        }
+    }
+
+    restoreWorkingTree(mergedFiles);
+    repo.setStaging(mergedFiles);
+
+    mergeInProgress = true;
+    mergeParentId = targetHead;
+    mergeBranchName = branchName;
+
+    if (unresolvedConflicts.empty()) {
+        cout << "Merge completed without conflicts." << endl;
+        cout << "Merged files are staged." << endl;
+    }
+    else {
+        cout << "Merge has conflicts!" << endl;
+
+        for (const string& path : unresolvedConflicts) {
+            cout << "CONFLICT: " << path << endl;
+        }
+
+        cout << "Resolve conflicts, then use git add." << endl;
     }
 }
 
@@ -681,6 +1358,54 @@ void CommandHandler::execute(const string& command) {
 
         cout << "Branch " << argument << " created." << endl;
     }
+    else if (operation == "checkout") {
+        string branchName;
+        string extra;
+
+        if (!(input >> branchName) || (input >> extra)) {
+            throw invalid_argument("Usage: git checkout <branch>");
+        }
+
+        checkoutBranch(branchName);
+    }
+    else if (operation == "merge") {
+    string branchName;
+    string extra;
+
+    if (!(input >> branchName) || (input >> extra)) {
+        throw invalid_argument("Usage: git merge <branch>");
+    }
+
+    mergeBranch(branchName);
+}
+else if (operation == "reset") {
+    string mode;
+    string commitIdText;
+    string extra;
+
+    if (!(input >> mode >> commitIdText) || (input >> extra)) {
+        throw invalid_argument(
+            "Usage: git reset <--soft|--mixed|--hard> <commit>"
+        );
+    }
+
+    try {
+        size_t position;
+        int commitId = stoi(commitIdText, &position);
+
+        if (position != commitIdText.size() || commitId <= 0) {
+            throw invalid_argument("Invalid commit ID.");
+        }
+
+        reset(mode, commitId);
+    }
+    catch (const invalid_argument&) {
+        throw invalid_argument("Invalid reset mode or commit ID.");
+    }
+    catch (const out_of_range&) {
+        throw invalid_argument("Commit ID is out of range.");
+    }
+}
     else if (operation == "add") {
         string name;
         string extra;
@@ -758,6 +1483,16 @@ void CommandHandler::execute(const string& command) {
         }
 
         showLog();
+    }
+        else if (operation == "diff") {
+        string filename;
+        string extra;
+
+        if (!(input >> filename) || (input >> extra)) {
+            throw invalid_argument("Usage: git diff <filename>");
+        }
+
+        showDiff(filename);
     }
     else {
         throw invalid_argument("Unknown Git command: " + operation);

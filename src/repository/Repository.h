@@ -18,6 +18,7 @@ private:
     string userName;
     string userEmail;
     bool initialized;
+    bool detachedHead;
     string rootPath;
     string currentBranch;
     int headCommitId;
@@ -35,6 +36,7 @@ public:
     string getUserEmail() const;
 
     bool isInitialized() const;
+    bool isDetachedHead() const;
     void initialize(const string& path);
     string getRootPath() const;
     string getCurrentBranch() const;
@@ -46,6 +48,8 @@ public:
     bool createBranch(const string& name);
     bool deleteBranch(const string& name);
     bool checkoutBranch(const string& name);
+    bool fastForwardCurrentBranch(int commitId);
+    int getBranchHeadCommitId(const string& name) const;
 
     const vector<Commit::FileSnapshot>& getStaging() const;
     void setStaging(const vector<Commit::FileSnapshot>& files);
@@ -53,6 +57,7 @@ public:
     void removeFromStaging(const string& path);
 
     void addCommit(const Commit& commit);
+    void resetHead(int commitId);
     const vector<Commit>& getCommits() const;
     const Commit* findCommit(int id) const;
 };

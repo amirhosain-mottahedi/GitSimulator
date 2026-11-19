@@ -17,6 +17,7 @@ public:
 private:
     int id;
     int parentId;
+    int secondParentId;
 
     string message;
     string authorName;
@@ -33,11 +34,13 @@ public:
         const string& name,
         const string& email,
         const string& commitDate,
-        const vector<FileSnapshot>& files
+        const vector<FileSnapshot>& files,
+        int secondParentCommitId = -1
     );
 
     int getId() const;
     int getParentId() const;
+    int getSecondParentId() const;
 
     string getMessage() const;
     string getAuthorName() const;
