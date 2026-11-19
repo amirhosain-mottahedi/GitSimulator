@@ -33,6 +33,165 @@ const Commit::FileSnapshot* CommandHandler::findFile(
     return nullptr;
 }
 
+bool CommandHandler::mergeFileContents(
+    const vector<string>& base,
+    const vector<string>& ours,
+    const vector<string>& theirs,
+    vector<string>& merged
+) const {
+    if (ours == theirs) {
+        merged = ours;
+        return true;
+    }
+
+    if (ours == base) {
+        merged = theirs;
+        return true;
+    }
+
+    if (theirs == base) {
+        merged = ours;
+        return true;
+    }
+
+    struct Edit {
+        int start;
+        int end;
+        vector<string> lines;
+    };
+
+    auto buildEdits = [](
+        const vector<string>& original,
+        const vector<string>& changed
+    ) {
+        int n = static_cast<int>(original.size());
+        int m = static_cast<int>(changed.size());
+
+        vector<vector<int>> lcs(
+            n + 1,
+            vector<int>(m + 1, 0)
+        );
+
+        for (int i = n - 1; i >= 0; i--) {
+            for (int j = m - 1; j >= 0; j--) {
+                if (original[i] == changed[j]) {
+                    lcs[i][j] = 1 + lcs[i + 1][j + 1];
+                }
+                else {
+                    lcs[i][j] = max(
+                        lcs[i + 1][j],
+                        lcs[i][j + 1]
+                    );
+                }
+            }
+        }
+
+        vector<Edit> edits;
+        int i = 0;
+        int j = 0;
+
+        while (i < n || j < m) {
+            if (i < n && j < m &&
+                original[i] == changed[j]) {
+                i++;
+                j++;
+                continue;
+            }
+
+            Edit edit;
+            edit.start = i;
+            edit.end = i;
+
+            while (i < n || j < m) {
+                if (i < n && j < m &&
+                    original[i] == changed[j]) {
+                    break;
+                }
+
+                if (j < m &&
+                    (i == n || lcs[i][j + 1] >
+                               lcs[i + 1][j])) {
+                    edit.lines.push_back(changed[j]);
+                    j++;
+                }
+                else if (i < n) {
+                    i++;
+                    edit.end = i;
+                }
+                else {
+                    edit.lines.push_back(changed[j]);
+                    j++;
+                }
+            }
+
+            edits.push_back(edit);
+        }
+
+        return edits;
+    };
+
+    vector<Edit> ourEdits = buildEdits(base, ours);
+    vector<Edit> theirEdits = buildEdits(base, theirs);
+
+    vector<Edit> allEdits = ourEdits;
+
+    for (const Edit& theirsEdit : theirEdits) {
+        bool duplicate = false;
+
+        for (const Edit& oursEdit : ourEdits) {
+            bool overlaps =
+                theirsEdit.start <= oursEdit.end &&
+                oursEdit.start <= theirsEdit.end;
+
+            if (overlaps) {
+                if (theirsEdit.start == oursEdit.start &&
+                    theirsEdit.end == oursEdit.end &&
+                    theirsEdit.lines == oursEdit.lines) {
+                    duplicate = true;
+                    break;
+                }
+
+                return false;
+            }
+        }
+
+        if (!duplicate) {
+            allEdits.push_back(theirsEdit);
+        }
+    }
+
+    sort(
+        allEdits.begin(),
+        allEdits.end(),
+        [](const Edit& a, const Edit& b) {
+            return a.start < b.start;
+        }
+    );
+
+    merged.clear();
+    int position = 0;
+
+    for (const Edit& edit : allEdits) {
+        while (position < edit.start) {
+            merged.push_back(base[position]);
+            position++;
+        }
+
+        for (const string& line : edit.lines) {
+            merged.push_back(line);
+        }
+
+        position = edit.end;
+    }
+
+    while (position < static_cast<int>(base.size())) {
+        merged.push_back(base[position]);
+        position++;
+    }
+
+    return true;
+}
+
 void CommandHandler::removeResolvedConflict(const string& path) {
     auto it = find(
         unresolvedConflicts.begin(),
@@ -230,11 +389,11 @@ void CommandHandler::initializeRepository() {
 
 void CommandHandler::addFile(const string& name) {
     if (name.empty() ||
-        name.find('/') != string::npos ||
-        name.find(' ') != string::npos) {
-        throw invalid_argument("Invalid filename.");
-    }
-
+    name.find_first_not_of(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    ) != string::npos) {
+    throw invalid_argument("Invalid filename.");
+}
     string currentPath = fs.getCurrentPath();
     string fullPath;
 
@@ -325,9 +484,23 @@ void CommandHandler::addAllFiles() {
     string prefix = getRelativePath(currentPath);
 
     for (int i = 0; i < static_cast<int>(working.size()); i++) {
-        repo.addToStaging(working[i]);
+    repo.addToStaging(working[i]);
+
+    bool hasConflictMarkers = false;
+
+    for (const string& line : working[i].content) {
+        if (line.find("<<<<<<<") != string::npos ||
+            line.find("=======") != string::npos ||
+            line.find(">>>>>>>") != string::npos) {
+            hasConflictMarkers = true;
+            break;
+        }
     }
 
+    if (!hasConflictMarkers) {
+        removeResolvedConflict(working[i].path);
+    }
+}
     vector<Commit::FileSnapshot> staged = repo.getStaging();
 
     for (int i = 0; i < static_cast<int>(staged.size()); i++) {
@@ -360,11 +533,11 @@ void CommandHandler::addAllFiles() {
 
 void CommandHandler::resetFile(const string& name) {
     if (name.empty() ||
-        name.find('/') != string::npos ||
-        name.find(' ') != string::npos) {
-        throw invalid_argument("Invalid filename.");
-    }
-
+    name.find_first_not_of(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    ) != string::npos) {
+    throw invalid_argument("Invalid filename.");
+}
     string currentPath = fs.getCurrentPath();
     string fullPath;
 
@@ -410,6 +583,40 @@ void CommandHandler::createCommit(const string& message) {
     if (message.empty()) {
         throw invalid_argument("Commit message cannot be empty.");
     }
+    if (!mergeInProgress) {
+    size_t openParen = message.find('(');
+    size_t closeParen = message.find(')');
+    size_t colon = message.find(':');
+
+    vector<string> allowedTypes = {
+        "feat", "fix", "refactor", "docs",
+        "test", "style", "chore", "perf", "build"
+    };
+
+    string type = message.substr(0, openParen);
+
+    bool validType = false;
+
+    for (const string& allowed : allowedTypes) {
+        if (type == allowed) {
+            validType = true;
+            break;
+        }
+    }
+
+    if (!validType ||
+        openParen == string::npos ||
+        closeParen == string::npos ||
+        colon == string::npos ||
+        closeParen != colon - 1 ||
+        closeParen <= openParen + 1 ||
+        colon + 2 >= message.size() ||
+        message[colon + 1] != ' ') {
+        throw invalid_argument(
+            "Invalid commit message. Use type(scope): description."
+        );
+    }
+}
 
     if (mergeInProgress && !unresolvedConflicts.empty()) {
         throw runtime_error(
@@ -737,45 +944,57 @@ void CommandHandler::showBranches() const {
     }
 }
 
+
 bool CommandHandler::hasUncommittedChanges() {
     vector<Commit::FileSnapshot> working =
         getWorkingFiles(repo.getRootPath());
 
-    const Commit* head = repo.findCommit(repo.getHeadCommitId());
+    const Commit* head =
+        repo.findCommit(repo.getHeadCommitId());
+
     vector<Commit::FileSnapshot> committed;
 
     if (head != nullptr) {
         committed = head->getSnapshot();
     }
 
-    const vector<Commit::FileSnapshot>& staged = repo.getStaging();
+    const vector<Commit::FileSnapshot>& staged =
+        repo.getStaging();
 
-    if (working.size() != committed.size() ||
-        staged.size() != committed.size()) {
+    // Check staged files against the current commit.
+    if (staged.size() != committed.size()) {
         return true;
     }
 
-    for (int i = 0; i < static_cast<int>(committed.size()); i++) {
-        bool foundWorking = false;
-        bool foundStaged = false;
+    for (const auto& file : committed) {
+        bool found = false;
 
-        for (int j = 0; j < static_cast<int>(working.size()); j++) {
-            if (working[j].path == committed[i].path &&
-                working[j].content == committed[i].content) {
-                foundWorking = true;
+        for (const auto& stagedFile : staged) {
+            if (file.path == stagedFile.path &&
+                file.content == stagedFile.content) {
+                found = true;
                 break;
             }
         }
 
-        for (int j = 0; j < static_cast<int>(staged.size()); j++) {
-            if (staged[j].path == committed[i].path &&
-                staged[j].content == committed[i].content) {
-                foundStaged = true;
+        if (!found) {
+            return true;
+        }
+    }
+
+    // Check tracked files in the working tree.
+    for (const auto& file : committed) {
+        bool found = false;
+
+        for (const auto& workingFile : working) {
+            if (file.path == workingFile.path &&
+                file.content == workingFile.content) {
+                found = true;
                 break;
             }
         }
 
-        if (!foundWorking || !foundStaged) {
+        if (!found) {
             return true;
         }
     }
@@ -789,18 +1008,60 @@ void CommandHandler::restoreWorkingTree(
     vector<FileSystem::FileData> current =
         fs.getAllFiles(repo.getRootPath());
 
+    vector<Commit::FileSnapshot> oldSnapshot;
+
+    int currentHeadId = repo.getHeadCommitId();
+
+    if (currentHeadId != 0) {
+        const Commit* currentCommit =
+            repo.findCommit(currentHeadId);
+
+        if (currentCommit == nullptr) {
+            throw runtime_error("Current commit not found.");
+        }
+
+        oldSnapshot = currentCommit->getSnapshot();
+    }
+
+    // Check for conflicts with untracked files before changing anything.
     for (int i = 0; i < static_cast<int>(current.size()); i++) {
+        bool tracked = false;
+
+        for (int j = 0; j < static_cast<int>(oldSnapshot.size()); j++) {
+            if (current[i].path == oldSnapshot[j].path) {
+                tracked = true;
+                break;
+            }
+        }
+
+        if (!tracked) {
+            for (int j = 0; j < static_cast<int>(snapshot.size()); j++) {
+                if (current[i].path == snapshot[j].path) {
+                    throw runtime_error(
+                        "Checkout would overwrite untracked file: " +
+                        current[i].path
+                    );
+                }
+            }
+        }
+    }
+
+    // Remove only files tracked by the current commit.
+    for (int i = 0; i < static_cast<int>(oldSnapshot.size()); i++) {
         string fullPath = repo.getRootPath();
 
         if (fullPath == "/") {
-            fullPath += current[i].path;
+            fullPath += oldSnapshot[i].path;
         }
         else {
-            fullPath += "/" + current[i].path;
+            fullPath += "/" + oldSnapshot[i].path;
         }
 
         if (!fs.deleteFile(fullPath)) {
-            throw runtime_error("Could not remove a working file.");
+            throw runtime_error(
+                "Could not remove tracked file: " +
+                oldSnapshot[i].path
+            );
         }
     }
 
@@ -824,6 +1085,12 @@ void CommandHandler::restoreWorkingTree(
 
 
 void CommandHandler::checkoutBranch(const string& name) {
+        if (mergeInProgress) {
+        throw runtime_error(
+            "Cannot checkout while a merge is in progress."
+        );
+    }
+
     bool isBranch = repo.branchExists(name);
     int targetHeadId = -1;
 
@@ -893,10 +1160,11 @@ void CommandHandler::checkoutBranch(const string& name) {
 
 void CommandHandler::showDiff(const string& filename) {
     if (filename.empty() ||
-        filename.find('/') != string::npos ||
-        filename.find(' ') != string::npos) {
-        throw invalid_argument("Invalid filename.");
-    }
+    filename.find_first_not_of(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    ) != string::npos) {
+    throw invalid_argument("Invalid filename.");
+}
 
     string currentPath = fs.getCurrentPath();
     string fullPath;
@@ -954,40 +1222,44 @@ void CommandHandler::showDiff(const string& filename) {
         }
     }
 
-    if (stagedContent == workingContent) {
-        cout << "No differences found." << endl;
-        return;
+   if (stagedContent == workingContent) {
+    cout << "No differences found." << endl;
+    return;
+}
+
+cout << "diff -- " << relativePath << endl;
+
+int i = 0;
+int j = 0;
+
+while (i < stagedSize && j < workingSize) {
+    if (stagedContent[i] == workingContent[j]) {
+        i++;
+        j++;
     }
-
-    cout << "diff -- " << relativePath << endl;
-
-    int i = 0;
-    int j = 0;
-
-    while (i < stagedSize && j < workingSize) {
-        if (stagedContent[i] == workingContent[j]) {
-            i++;
-            j++;
-        }
-        else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
-            cout << "- " << stagedContent[i] << endl;
-            i++;
-        }
-        else {
-            cout << "+ " << workingContent[j] << endl;
-            j++;
-        }
-    }
-
-    while (i < stagedSize) {
+    else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+        cout << "Line " << i + 1 << ":" << endl;
         cout << "- " << stagedContent[i] << endl;
         i++;
     }
-
-    while (j < workingSize) {
+    else {
+        cout << "Line " << j + 1 << ":" << endl;
         cout << "+ " << workingContent[j] << endl;
         j++;
     }
+}
+
+while (i < stagedSize) {
+    cout << "Line " << i + 1 << ":" << endl;
+    cout << "- " << stagedContent[i] << endl;
+    i++;
+}
+
+while (j < workingSize) {
+    cout << "Line " << j + 1 << ":" << endl;
+    cout << "+ " << workingContent[j] << endl;
+    j++;
+}
 }
 
 void CommandHandler::showLog() {
@@ -1042,6 +1314,16 @@ void CommandHandler::showLog() {
 void CommandHandler::mergeBranch(const string& branchName) {
     if (!repo.isInitialized()) {
         throw runtime_error("Repository is not initialized.");
+    }
+    if (repo.isDetachedHead()) {
+    throw runtime_error(
+        "Cannot merge while HEAD is detached."
+    );
+}
+    if (mergeInProgress) {
+        throw runtime_error(
+            "A merge is already in progress."
+        );
     }
 
     if (!repo.branchExists(branchName)) {
@@ -1170,36 +1452,57 @@ const Commit* baseCommit = repo.findCommit(commonAncestor);
         }
         else if (sameFile(theirFile, baseFile)) {
             selectedFile = ourFile;
-        }
-        else {
-            Commit::FileSnapshot conflictFile;
-            conflictFile.path = path;
+        }      
+else {
+    
+    if (baseFile != nullptr &&
+        ourFile != nullptr &&
+        theirFile != nullptr) {
 
-            conflictFile.content.push_back("<<<<<<< HEAD");
+        vector<string> mergedContent;
 
-            if (ourFile != nullptr) {
-                for (const string& line : ourFile->content) {
-                    conflictFile.content.push_back(line);
-                }
-            }
+        if (mergeFileContents(
+            baseFile->content,
+            ourFile->content,
+            theirFile->content,
+            mergedContent
+        )) {
+            Commit::FileSnapshot mergedFile;
+            mergedFile.path = path;
+            mergedFile.content = mergedContent;
 
-            conflictFile.content.push_back("=======");
-
-            if (theirFile != nullptr) {
-                for (const string& line : theirFile->content) {
-                    conflictFile.content.push_back(line);
-                }
-            }
-
-            conflictFile.content.push_back(
-                ">>>>>>> " + branchName
-            );
-
-            mergedFiles.push_back(conflictFile);
-            unresolvedConflicts.push_back(path);
+            mergedFiles.push_back(mergedFile);
             continue;
         }
+    }
 
+    Commit::FileSnapshot conflictFile;
+    conflictFile.path = path;
+
+    conflictFile.content.push_back("<<<<<<< HEAD");
+
+    if (ourFile != nullptr) {
+        for (const string& line : ourFile->content) {
+            conflictFile.content.push_back(line);
+        }
+    }
+
+    conflictFile.content.push_back("=======");
+
+    if (theirFile != nullptr) {
+        for (const string& line : theirFile->content) {
+            conflictFile.content.push_back(line);
+        }
+    }
+
+    conflictFile.content.push_back(
+        ">>>>>>> " + branchName
+    );
+
+    mergedFiles.push_back(conflictFile);
+    unresolvedConflicts.push_back(path);
+    continue;
+}
         if (selectedFile != nullptr) {
             mergedFiles.push_back(*selectedFile);
         }
@@ -1213,9 +1516,8 @@ const Commit* baseCommit = repo.findCommit(commonAncestor);
     mergeBranchName = branchName;
 
     if (unresolvedConflicts.empty()) {
-        cout << "Merge completed without conflicts." << endl;
-        cout << "Merged files are staged." << endl;
-    }
+    createCommit("Merge " + branchName);
+}
     else {
         cout << "Merge has conflicts!" << endl;
 
@@ -1251,7 +1553,7 @@ void CommandHandler::execute(const string& command) {
 
         size_t first = value.find_first_not_of(" \t");
         size_t last = value.find_last_not_of(" \t");
-
+        
         if (first == string::npos) {
             if (key == "user.name") {
                 cout << repo.getUserName() << endl;
@@ -1347,7 +1649,7 @@ void CommandHandler::execute(const string& command) {
         }
 
         if (argument.find_first_not_of(
-                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
             ) != string::npos) {
             throw invalid_argument("Invalid branch name.");
         }
@@ -1378,34 +1680,58 @@ void CommandHandler::execute(const string& command) {
 
     mergeBranch(branchName);
 }
+
 else if (operation == "reset") {
-    string mode;
-    string commitIdText;
+    string first;
+    string second;
     string extra;
 
-    if (!(input >> mode >> commitIdText) || (input >> extra)) {
+    if (!(input >> first)) {
         throw invalid_argument(
-            "Usage: git reset <--soft|--mixed|--hard> <commit>"
+            "Usage: git reset <filename> or git reset <--soft|--mixed|--hard> <commit>"
         );
     }
 
-    try {
-        size_t position;
-        int commitId = stoi(commitIdText, &position);
+    if (first == "--soft" ||
+        first == "--mixed" ||
+        first == "--hard") {
 
-        if (position != commitIdText.size() || commitId <= 0) {
-            throw invalid_argument("Invalid commit ID.");
+        if (!(input >> second) || (input >> extra)) {
+            throw invalid_argument(
+                "Usage: git reset <--soft|--mixed|--hard> <commit>"
+            );
         }
 
-        reset(mode, commitId);
+        int commitId;
+
+        try {
+            size_t position;
+            commitId = stoi(second, &position);
+
+            if (position != second.size() || commitId <= 0) {
+                throw invalid_argument("Invalid commit ID.");
+            }
+        }
+        catch (const invalid_argument&) {
+            throw invalid_argument("Invalid commit ID.");
+        }
+        catch (const out_of_range&) {
+            throw invalid_argument("Commit ID is out of range.");
+        }
+
+        reset(first, commitId);
     }
-    catch (const invalid_argument&) {
-        throw invalid_argument("Invalid reset mode or commit ID.");
-    }
-    catch (const out_of_range&) {
-        throw invalid_argument("Commit ID is out of range.");
+    else {
+        if (input >> extra) {
+            throw invalid_argument(
+                "Usage: git reset <filename>"
+            );
+        }
+
+        resetFile(first);
     }
 }
+
     else if (operation == "add") {
         string name;
         string extra;
@@ -1425,16 +1751,7 @@ else if (operation == "reset") {
             addFile(name);
         }
     }
-    else if (operation == "reset") {
-        string name;
-        string extra;
 
-        if (!(input >> name) || (input >> extra)) {
-            throw invalid_argument("Usage: git reset <filename>");
-        }
-
-        resetFile(name);
-    }
     else if (operation == "commit") {
         string option;
         string message;

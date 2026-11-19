@@ -60,6 +60,13 @@ private:
         const string& path
     ) const;
 
+    bool mergeFileContents(
+        const vector<string>& base,
+        const vector<string>& ours,
+        const vector<string>& theirs,
+        vector<string>& merged
+    ) const;
+    
     void removeResolvedConflict(const string& path);
 
 public:
